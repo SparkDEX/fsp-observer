@@ -137,7 +137,10 @@ def get_config() -> Configuration:
     if rpc_base_url is None:
         raise ConfigError("RPC_BASE_URL environment variable must be set.")
 
-    rpc_url = rpc_base_url + "/ext/bc/C/rpc"
+    rpc_url = os.environ.get("RPC_URL")
+    if rpc_url is None:
+        raise ConfigError("RPC_URL environment variable must be set.")
+
     p_chain_rpc_url = rpc_base_url + "/ext/bc/P"
 
     w = Web3(Web3.HTTPProvider(rpc_url))
