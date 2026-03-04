@@ -80,6 +80,37 @@ def node_id_to_representation(node_id):
     return f"NodeID-{flare_b58_encode_check(decoded).decode()}"
 
 
+async def _get_logs_chunked(
+    w: AsyncWeb3,
+    filter_params: dict[str, Any],
+    *,
+    max_block_range: int = 30,
+) -> list[Any]:
+    from_block = filter_params.get("fromBlock")
+    to_block = filter_params.get("toBlock")
+
+    if not isinstance(from_block, int) or not isinstance(to_block, int):
+        return await w.eth.get_logs(filter_params)
+
+    if from_block > to_block:
+        return []
+
+    if to_block - from_block + 1 <= max_block_range:
+        return await w.eth.get_logs(filter_params)
+
+    logs: list[Any] = []
+    start = from_block
+    while start <= to_block:
+        end = min(start + max_block_range - 1, to_block)
+        chunk_params = dict(filter_params)
+        chunk_params["fromBlock"] = start
+        chunk_params["toBlock"] = end
+        logs.extend(await w.eth.get_logs(chunk_params))
+        start = end + 1
+
+    return logs
+
+
 class Signature(EthSignature):
     @classmethod
     def from_vrs(cls, s: SSignature) -> Self:
@@ -255,15 +286,17 @@ async def get_signing_policy_events(
         if e.name in event_names
     }
 
-    block_logs = await w.eth.get_logs(
+    block_logs = await _get_logs_chunked(
+        w,
         {
             "address": [contract.address for contract in contracts],
             "fromBlock": start_block,
             "toBlock": end_block,
-        }
+        },
     )
 
-    _relay_patch_sps = await w.eth.get_logs(
+    _relay_patch_sps = await _get_logs_chunked(
+        w,
         {
             "address": [
                 to_checksum_address("0x92a6E1127262106611e1e129BB64B6D8654273F7"),
@@ -277,7 +310,7 @@ async def get_signing_policy_events(
                 "0x"
                 + config.contracts.Relay.events["SigningPolicyInitialized"].signature
             ],
-        }
+        },
     )
     block_logs.extend(_relay_patch_sps)
 
