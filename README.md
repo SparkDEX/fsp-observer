@@ -23,6 +23,13 @@ The easiest way to run is via docker. The only required env variables are
 `RPC_BASE_URL` and `IDENTITY_ADDRESS`. Others can be set as desired.
 
 ```bash
+docker build -t fsp-observer:local . 2>&1 | tail -25
+
+
+docker rm -f fsp-observer 2>/dev/null; docker run -d --name fsp-observer --env-file .env --restart unless-stopped fsp-observer:local && sleep 15 && docker ps --filter name=fsp-observer --format '{{.Status}}'
+```bash
+
+```bash
 docker run \
     -e RPC_BASE_URL="https://flare-api.flare.network" \
     -e IDENTITY_ADDRESS="0x0000000000000000000000000000000000000000" \
