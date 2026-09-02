@@ -1,8 +1,10 @@
+import logging
 from collections.abc import Sequence
 from typing import Self
 
 from attrs import define, field, frozen
 from eth_typing import ChecksumAddress
+from eth_utils.address import to_checksum_address
 from py_flare_common.fsp.epoch.epoch import RewardEpoch
 from web3 import AsyncWeb3
 
@@ -19,6 +21,8 @@ from .types import (
     VoterRegistrationInfo,
     VoterRemoved,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 @frozen
@@ -195,36 +199,75 @@ class SigningPolicyBuilder:
         assert self.signing_policy_initialized is not None
         assert self.signing_policy_initialized.reward_epoch_id == rid
 
-        assert len(self.voter_registered) == len(self.voter_registration_info)
+        if len(self.voter_registered) != len(self.voter_registration_info):
+            LOGGER.warning(
+                f"Mismatched registration counts for reward epoch {rid}: "
+                f"voter_registered={len(self.voter_registered)}, "
+                f"voter_registration_info={len(self.voter_registration_info)}"
+            )
 
-        spa = {v.signing_policy_address: v.voter for v in self.voter_registered}
-        vres = {v.voter: v for v in self.voter_registered}
-        vries = {v.voter: v for v in self.voter_registration_info}
+        spa = {
+            to_checksum_address(v.signing_policy_address): to_checksum_address(v.voter)
+            for v in self.voter_registered
+        }
+        vres = {
+            to_checksum_address(v.voter): v for v in self.voter_registered
+        }
+        vries = {
+            to_checksum_address(v.voter): v for v in self.voter_registration_info
+        }
 
         entities: list[Entity] = []
         mapper = EntityMapper()
 
         for i, voter in enumerate(self.signing_policy_initialized.voters):
             weight = self.signing_policy_initialized.weights[i]
-            vre = vres[spa[voter]]
-            vrie = vries[spa[voter]]
+            voter_cs = to_checksum_address(voter)
+            voter_id = spa.get(voter_cs)
 
-            nodes = []
-            for n, w in zip(vrie.node_ids, vrie.node_weights, strict=False):
-                nodes.append(Node(n, w))
+            if voter_id is None:
+                LOGGER.warning(
+                    f"Voter {voter_cs} in signing policy not found in VoterRegistered events for reward epoch {rid}"
+                )
+                voter_id = voter_cs
+
+            vre = vres.get(voter_id)
+            vrie = vries.get(voter_id)
+
+            if vre is None or vrie is None:
+                LOGGER.warning(
+                    f"Incomplete registration info for voter {voter_cs} (voter_id={voter_id}) for reward epoch {rid}"
+                )
+
+            identity_address = vre.voter if vre else voter_id
+            submit_address = vre.submit_address if vre else voter_cs
+            submit_signatures_address = vre.submit_signatures_address if vre else voter_cs
+            signing_policy_address = vre.signing_policy_address if vre else voter_cs
+            public_key = vre.public_key if vre else ""
+            registration_weight = vre.registration_weight if vre else 0
+
+            delegation_address = vrie.delegation_address if vrie else voter_cs
+            delegation_fee_bips = vrie.delegation_fee_bips if vrie else 0
+            w_nat_weight = vrie.w_nat_weight if vrie else 0
+            w_nat_capped_weight = vrie.w_nat_capped_weight if vrie else 0
+            nodes = (
+                [Node(n, w) for n, w in zip(vrie.node_ids, vrie.node_weights, strict=False)]
+                if vrie
+                else []
+            )
 
             entity = Entity(
-                identity_address=vre.voter,
-                submit_address=vre.submit_address,
-                submit_signatures_address=vre.submit_signatures_address,
-                signing_policy_address=vre.signing_policy_address,
-                delegation_address=vrie.delegation_address,
-                public_key=vre.public_key,
+                identity_address=identity_address,
+                submit_address=submit_address,
+                submit_signatures_address=submit_signatures_address,
+                signing_policy_address=signing_policy_address,
+                delegation_address=delegation_address,
+                public_key=public_key,
                 nodes=nodes,
-                delegation_fee_bips=vrie.delegation_fee_bips,
-                w_nat_weight=vrie.w_nat_weight,
-                w_nat_capped_weight=vrie.w_nat_capped_weight,
-                registration_weight=vre.registration_weight,
+                delegation_fee_bips=delegation_fee_bips,
+                w_nat_weight=w_nat_weight,
+                w_nat_capped_weight=w_nat_capped_weight,
+                registration_weight=registration_weight,
                 normalized_weight=weight,
             )
 

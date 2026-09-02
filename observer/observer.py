@@ -164,11 +164,17 @@ def calculate_update_from_tx(config: Configuration, w: AsyncWeb3, tx: TxData):
     return signing_policy_address, address, signed_array
 
 
+# sampled over a short window so pruned rpc nodes, which only retain recent history,
+# can still serve the comparison block; block production is stable enough that a few
+# thousand blocks give the same rate as a much deeper sample
+BLOCK_PRODUCTION_SAMPLE_BLOCKS = 5_000
+
+
 async def get_block_production(w: AsyncWeb3) -> float:
     latest_block = await w.eth.get_block("latest")
     assert "timestamp" in latest_block
     assert "number" in latest_block
-    to_compare = min(1_000_000, int(latest_block["number"]) - 1)
+    to_compare = min(BLOCK_PRODUCTION_SAMPLE_BLOCKS, int(latest_block["number"]) - 1)
     comparison_block = await w.eth.get_block(int(latest_block["number"]) - to_compare)
     assert "timestamp" in comparison_block
     time_delta = latest_block["timestamp"] - comparison_block["timestamp"]
@@ -189,8 +195,8 @@ def calculate_maximum_exponent(block_production: float, config: Configuration) -
 # acquisition, then voter registration, then the signing policy event all land in that
 # window, independent of the reward epoch length (3.5d on mainnets, 6h on testnets)
 SIGNING_POLICY_INITIALIZATION_S = 2 * 60 * 60
-# scan a bit wider on both ends so boundary events aren't clipped by block estimation
-REGISTRATION_SCAN_BUFFER_S = 30 * 60
+# scan wider on both ends so boundary events aren't clipped by block estimation
+REGISTRATION_SCAN_BUFFER_S = 2 * 60 * 60
 
 
 async def find_block_at_timestamp(
