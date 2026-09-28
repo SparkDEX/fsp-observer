@@ -196,6 +196,11 @@ def get_config() -> Configuration:
         os.environ.get("SUPPRESS_FTSO_MISSING_FEED", "false").lower() == "true"
     )
 
+    # skip reading the current signing policy from past blocks at startup; the
+    # observer then waits for the next signing policy seen live and only starts
+    # monitoring with its reward epoch (useful with rpc nodes without deep history)
+    skip_backfill = os.environ.get("SKIP_BACKFILL", "false").lower() == "true"
+
     config = Configuration(
         rpc_url=rpc_url,
         p_chain_rpc_url=p_chain_rpc_url,
@@ -210,6 +215,7 @@ def get_config() -> Configuration:
         max_block_range=max_block_range,
         false_positive_threshold=false_positive_threshold,
         suppress_ftso_missing_feed=suppress_ftso_missing_feed,
+        skip_backfill=skip_backfill,
     )
 
     return config

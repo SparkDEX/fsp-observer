@@ -76,6 +76,7 @@ RPC_BASE_URL="https://flare-api.flare.network" \
 | `MAX_BLOCK_RANGE` | no | `1000` | Max number of blocks per `get_logs` request (lower it if the RPC caps the block range) |
 | `FALSE_POSITIVE_THRESHOLD` | no | - | Suppress fast update miss notifications whose false positive probability (in %) is above this; unset = no suppression, mainly quiets low weight entities |
 | `SUPPRESS_FTSO_MISSING_FEED` | no | `false` | Suppress the FTSO "missing feed" warning (entity submitted no value for some feeds) |
+| `SKIP_BACKFILL` | no | `false` | Don't read the current signing policy from past blocks at startup; instead wait for the next signing policy seen live, so monitoring only starts with the next reward epoch (for RPC nodes without deep history) |
 
 ## Prometheus metrics
 

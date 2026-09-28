@@ -38,6 +38,7 @@ from observer.fast_updates_manager import FastUpdate, FastUpdatesManager
 from observer.reward_epoch_manager import (
     RewardManager,
     SigningPolicy,
+    SigningPolicyBuilder,
 )
 from observer.signing_policy_manager import SigningPolicyManager
 from observer.types import (
@@ -271,16 +272,24 @@ async def get_logs_chunked(
     return logs
 
 
-async def get_signing_policy_events(
+SigningPolicyEvent = (
+    RandomAcquisitionStarted
+    | VotePowerBlockSelected
+    | VoterRegistered
+    | VoterRegistrationInfo
+    | VoterRemoved
+    | SigningPolicyInitialized
+)
+
+
+async def get_signing_policy_logs(
     w: AsyncWeb3,
     config: Configuration,
-    reward_epoch: RewardEpoch,
     start_block: int,
     end_block: int,
-) -> SigningPolicy:
-    # reads logs for given blocks for the informations about the signing policy
-
-    builder = SigningPolicy.builder().for_epoch(reward_epoch)
+) -> list[SigningPolicyEvent]:
+    # reads and decodes, in chain order, the events that build signing policies
+    # emitted in the given blocks
 
     contracts = [
         config.contracts.VoterRegistry,
@@ -363,6 +372,7 @@ async def get_signing_policy_events(
     # chain order so the SigningPolicyInitialized early-break below doesn't skip them
     block_logs.sort(key=lambda log: (log["blockNumber"], log["logIndex"]))
 
+    events: list[SigningPolicyEvent] = []
     for log in block_logs:
         sig = log["topics"][0]
 
@@ -387,10 +397,27 @@ async def get_signing_policy_events(
                 e = RandomAcquisitionStarted.from_dict(data["args"])
             case x:
                 raise ValueError(f"Unexpected event {x}")
+        events.append(e)
+
+    return events
+
+
+async def get_signing_policy_events(
+    w: AsyncWeb3,
+    config: Configuration,
+    reward_epoch: RewardEpoch,
+    start_block: int,
+    end_block: int,
+) -> SigningPolicy:
+    # reads logs for given blocks for the informations about the signing policy
+
+    builder = SigningPolicy.builder().for_epoch(reward_epoch)
+
+    for e in await get_signing_policy_logs(w, config, start_block, end_block):
         builder.add(e)
 
         # signing policy initialized is the last event that gets emitted
-        if event.name == "SigningPolicyInitialized":
+        if isinstance(e, SigningPolicyInitialized):
             break
 
     return builder.build()
@@ -486,6 +513,17 @@ async def wait_until_registered(
             f" | starts_at_round={signing_policy.start_voting_round}"
         )
 
+    await wait_for_signing_policy_start(config, tia, signing_policy)
+    return signing_policy
+
+
+async def wait_for_signing_policy_start(
+    config: Configuration,
+    tia: ChecksumAddress,
+    signing_policy: SigningPolicy,
+) -> None:
+    vef = config.epoch.voting_epoch_factory
+
     log_message(
         config,
         Message.builder()
@@ -509,7 +547,78 @@ async def wait_until_registered(
         )
         await asyncio.sleep(min(remaining, 600))
 
-    return signing_policy
+
+async def follow_signing_policy_events(
+    w: AsyncWeb3,
+    config: Configuration,
+    tia: ChecksumAddress,
+    from_block: int,
+) -> SigningPolicy:
+    # with SKIP_BACKFILL the current signing policy is never read from past blocks;
+    # instead follow the chain from from_block and build signing policies only from
+    # events seen live, until one that includes the entity is initialized
+    vef = config.epoch.voting_epoch_factory
+    ref = config.epoch.reward_epoch_factory
+
+    builders: dict[int, SigningPolicyBuilder] = {}
+    next_block = from_block
+    while True:
+        latest_block = await w.eth.block_number
+        if latest_block < next_block:
+            metrics.VOTING_ROUND.set(vef.from_timestamp(int(time.time())).id)
+            metrics.REWARD_EPOCH.set(ref.from_timestamp(int(time.time())).id)
+            await asyncio.sleep(10)
+            continue
+
+        LOGGER.debug(f"Following signing policy events: #{next_block}-#{latest_block}")
+        events = await get_signing_policy_logs(w, config, next_block, latest_block)
+        for e in events:
+            rid = e.reward_epoch_id
+
+            # random acquisition is the first event of a signing policy; an epoch
+            # whose random acquisition started before we did would be incomplete
+            if isinstance(e, RandomAcquisitionStarted):
+                builders[rid] = SigningPolicy.builder().for_epoch(ref.make_epoch(rid))
+                LOGGER.info(f"Random acquisition started for reward epoch {rid}")
+
+            builder = builders.get(rid)
+            if builder is None:
+                if isinstance(e, SigningPolicyInitialized):
+                    LOGGER.info(
+                        f"Skipping signing policy for reward epoch {rid}: its"
+                        " registration started before the observer, waiting for"
+                        " the next one"
+                    )
+                continue
+            builder.add(e)
+
+            if not isinstance(e, SigningPolicyInitialized):
+                continue
+
+            signing_policy = builders.pop(rid).build()
+            nb_entities = len(signing_policy.entity_mapper.by_identity_address)
+            LOGGER.info(
+                f"Signing policy loaded: reward_epoch={rid}"
+                f" | entities={nb_entities}"
+                f" | starts_at_round={signing_policy.start_voting_round}"
+            )
+            if tia in signing_policy.entity_mapper.by_identity_address:
+                return signing_policy
+
+            log_message(
+                config,
+                Message.builder()
+                .add(network=config.chain_id)
+                .build(
+                    MessageLevel.WARNING,
+                    (
+                        f"Entity {tia} not registered for reward epoch {rid},"
+                        " waiting for the next signing policy"
+                    ),
+                ),
+            )
+
+        next_block = latest_block + 1
 
 
 async def cron(
@@ -601,38 +710,51 @@ async def observer_loop(config: Configuration) -> None:
         f" | max_exponent={maximum_exponent}"
     )
 
-    # we first fill signing policy for current reward epoch
-
-    # the signing policy is initialized in the 2h before the reward epoch; find the
-    # block range spanning that window to read the events that build it
-    lower_block_id, end_block_id = await find_voter_registration_blocks(
-        w, block["number"], reward_epoch, block_production
-    )
-
-    # get informations for events that build the current signing policy
-    signing_policy = await get_signing_policy_events(
-        w,
-        config,
-        reward_epoch,
-        lower_block_id,
-        end_block_id,
-    )
-    nb_entities = len(signing_policy.entity_mapper.by_identity_address)
-    LOGGER.info(
-        f"Signing policy loaded: reward_epoch={reward_epoch.id}"
-        f" | entities={nb_entities}"
-        f" | starts_at_round={signing_policy.start_voting_round}"
-    )
-    # started before the potential registration wait below so the observer stays
-    # observable while it waits
+    # started before loading the signing policy so the observer stays observable
+    # while it waits for one
     if config.metrics.enabled:
         metrics.start_metrics_server(config.metrics.port, config.metrics.address)
 
-    if tia not in signing_policy.entity_mapper.by_identity_address:
-        LOGGER.warning(f"Entity {tia} NOT found in current signing policy!")
-        signing_policy = await wait_until_registered(
-            w, config, tia, signing_policy, block_production
+    if config.skip_backfill:
+        LOGGER.info(
+            "Backfill skipped: waiting for the next signing policy that includes"
+            f" {tia}, monitoring starts with its reward epoch"
         )
+        signing_policy = await follow_signing_policy_events(
+            w, config, tia, block["number"] + 1
+        )
+        await wait_for_signing_policy_start(config, tia, signing_policy)
+    else:
+        # we first fill signing policy for current reward epoch
+
+        # the signing policy is initialized in the 2h before the reward epoch; find
+        # the block range spanning that window to read the events that build it
+        lower_block_id, end_block_id = await find_voter_registration_blocks(
+            w, block["number"], reward_epoch, block_production
+        )
+
+        # get informations for events that build the current signing policy
+        signing_policy = await get_signing_policy_events(
+            w,
+            config,
+            reward_epoch,
+            lower_block_id,
+            end_block_id,
+        )
+        nb_entities = len(signing_policy.entity_mapper.by_identity_address)
+        LOGGER.info(
+            f"Signing policy loaded: reward_epoch={reward_epoch.id}"
+            f" | entities={nb_entities}"
+            f" | starts_at_round={signing_policy.start_voting_round}"
+        )
+
+        if tia not in signing_policy.entity_mapper.by_identity_address:
+            LOGGER.warning(f"Entity {tia} NOT found in current signing policy!")
+            signing_policy = await wait_until_registered(
+                w, config, tia, signing_policy, block_production
+            )
+
+    if signing_policy.reward_epoch != reward_epoch:
         reward_epoch = signing_policy.reward_epoch
 
         # the wait can span multiple reward epochs, refresh chain related state

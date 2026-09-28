@@ -300,3 +300,4 @@ class Configuration:
     max_block_range: int
     false_positive_threshold: float | None
     suppress_ftso_missing_feed: bool
+    skip_backfill: bool
