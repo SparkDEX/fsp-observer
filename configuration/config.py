@@ -196,9 +196,9 @@ def get_config() -> Configuration:
         os.environ.get("SUPPRESS_FTSO_MISSING_FEED", "false").lower() == "true"
     )
 
-    # skip reading the current signing policy from past blocks at startup; the
-    # observer then waits for the next signing policy seen live and only starts
-    # monitoring with its reward epoch (useful with rpc nodes without deep history)
+    # read the current signing policy from contract state at startup instead of
+    # scanning its registration events in past blocks (useful with rpc nodes without
+    # deep history); capped wnat weights are recomputed for the first reward epoch
     skip_backfill = os.environ.get("SKIP_BACKFILL", "false").lower() == "true"
 
     config = Configuration(
