@@ -20,14 +20,23 @@ class ProtocolMessageRelayed:
     timestamp: int
 
     def to_message(self) -> bytes:
-        message = (
+        return (
             self.protocol_id.to_bytes(1, "big")
             + self.voting_round_id.to_bytes(4, "big")
             + self.is_secure_random.to_bytes(1, "big")
             + bytes.fromhex(self.merkle_root)
         )
 
-        return _hash_eip191_message(encode_defunct(keccak(message)))
+    def to_signed_hashes(self, chain_id: int) -> tuple[bytes, bytes]:
+        # NOTE:(@janezicmatej) newer relay binds the signed digest to the source chain
+        # (keccak256(sourceChainId || message)) while older deployments sign
+        # keccak256(message); both are returned so voters on either variant validate
+        message = self.to_message()
+        legacy = _hash_eip191_message(encode_defunct(keccak(message)))
+        chain_bound = _hash_eip191_message(
+            encode_defunct(keccak(chain_id.to_bytes(32, "big") + message))
+        )
+        return legacy, chain_bound
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], block_data: BlockData) -> Self:

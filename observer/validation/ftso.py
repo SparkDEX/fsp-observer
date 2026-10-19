@@ -233,6 +233,7 @@ def check_submit_signatures(
     extracted_round: ExtractedEntityVotingRound[
         FtsoSubmit1, FtsoSubmit2, SubmitSignatures
     ],
+    config: Configuration,
     **_,
 ) -> Sequence[Message]:
     issues = []
@@ -291,11 +292,9 @@ def check_submit_signatures(
         s = Signature.from_parsed_signature(
             submit_signatures.parsed_payload.payload.signature
         )
-        addr = s.recover_public_key_from_msg_hash(
-            finalization.to_message()
-        ).to_checksum_address()
-
-        if addr != entity.signing_policy_address:
+        if not s.signs_finalization(
+            finalization, config.chain_id, entity.signing_policy_address
+        ):
             metrics.SIGNATURE_MISMATCH.labels(
                 identity_address=metrics.identity_address, protocol="ftso"
             ).inc()
